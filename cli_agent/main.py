@@ -7,6 +7,7 @@ from typing import List
 import subprocess
 import argparse
 import sys
+from tavily import TavilyClient
 
 load_dotenv()   
 # Initialize Groq client
@@ -21,6 +22,29 @@ class TerminalCommand(BaseModel):
 class TerminalCommands(BaseModel):
     commands: List[TerminalCommand] = Field(description="List of terminal commands")
 
+class ListTools(BaseModel):
+    tools: List[str] = Field(description="List of tools")
+    
+tools = [
+    {
+        "name": "commands",
+        "description": "Generates and executes Windows terminal commands. Use this for system operations, file management, or when the user needs to perform actions on their computer."
+    },
+    {
+        "name": "search",
+        "description": "Searches the internet for up-to-date information. Use this when the query requires external knowledge, current events, or information not available in the system."
+    }
+]
+
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+
+def search_with_tavily(query: str):
+    try:
+        response = tavily_client.search(query)
+        return response
+    except Exception as e:
+        return f"Error: {str(e)}"
+
 def generate_commands(query: str) -> TerminalCommands:
     return client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -31,16 +55,6 @@ def generate_commands(query: str) -> TerminalCommands:
         response_model=TerminalCommands,
     )
 
-def generate_commands_with_ollama(query: str) -> TerminalCommands:
-    return client.chat.completions.create(
-        model="ollama-3.1",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that generates windows terminal commands. Give only direct terminal commands for the given query."},
-            {"role": "user", "content": f"Generate terminal commands for: {query}"}
-        ],
-        response_model=TerminalCommands,
-    )
-    
 def execute_commands(TerminalCommands):
     output = ""
     for command in TerminalCommands.commands:
@@ -48,59 +62,65 @@ def execute_commands(TerminalCommands):
         output += result.stdout
     return output
 
-def chat_with_llm(query: str,results) -> str:
+def tools_selection(query: str, tools) -> ListTools:
+    result = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": f"You are a tool selection agent that looks at the query and gives a list of tools that can be used for the given query from the existing tools : {tools} or if no tools are needed"},
+            {"role": "user", "content": f"Tools needed for: {query}"}
+        ],
+        response_model=ListTools,
+    )
+    return result
+
+def agent_with_tools(query: str, tools) -> str:
+    results = ""
+    for tool in tools.tools:
+        if tool == "search":
+            response = search_with_tavily(query)
+            results += str(response)
+        elif tool == "commands":
+            commands = generate_commands(query)
+            results += execute_commands(commands)
+    return results
+
+def chat_with_llm(query: str, results) -> str:
     return client_base.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
-            {"role": "system", "content": "You are a personalised llm that recieves the query the output from the cli-agent and you need to reply taking the query and the agents output as input and give a response"},
-            {"role": "user", "content": f"Query is :{query} and the output from agent is :{results} "}
+            {"role": "system", "content": "You are a personalised llm that receives the query the output from the cli-agent and you need to reply taking the query and the agents output as input and give a response, and if the agents output is empty then you need to give a response based on the query"},
+            {"role": "user", "content": f"Query is: {query} and the output from agent is: {results}"}
         ],
-        # response_model=str,
     )
-    
-def main():
-    parser = argparse.ArgumentParser(description="Generate and execute Windows terminal commands.")
-    parser.add_argument("query", nargs='*', help="The query to generate commands for")
-    parser.add_argument("-e", "--execute", action="store_true", help="Execute the generated commands")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Show generated commands")
-    parser.add_argument("-c", "--chat", action="store_true", default=True, help="Chat with the llm (default)")
 
+def main():
+    parser = argparse.ArgumentParser(description="Cli-agent is a command line tool that can run commands and search web for simple queries.")
+    parser.add_argument("query", nargs="*", help="The query to process")
+    parser.add_argument("-c", "--chat", action="store_true", default=True, help="Chat with the llm (default)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print verbose output")
+    
     args = parser.parse_args()
 
-    # Check if any query was provided
     if not args.query:
         print("Please provide a query.")
         parser.print_help()
         sys.exit(1)
 
     query = ' '.join(args.query)
-    result = generate_commands(query)
-
-    # If any explicit flag is provided, turn off chat mode
-    if args.execute or args.verbose:
-        args.chat = False
-
+    
+    selected_tools = tools_selection(query, tools)
+    result = agent_with_tools(query, selected_tools)
+    
     if args.verbose:
-        print("Generated commands:")
-        print(result.model_dump_json(indent=2))
-
-    if args.execute:
-        print("Executing commands:")
-        output = execute_commands(result)
-        print(output)
+        print("Tools selected:")
+        print(selected_tools)
+        print("Output from the selected tools:")
+        print(result)
         
     if args.chat:
         print("Chatting with llm:")
-        output = execute_commands(result)
-        response = chat_with_llm(query, output)
-        # print(response.model_dump_json(indent=2))
-        print(f" result is {result} output is {output}")
+        response = chat_with_llm(query, result)
         print(response.choices[0].message.content)
-        
-    elif not args.verbose and not args.execute and not args.chat:
-        print("Generated commands:")
-        for command in result.commands:
-            print(command.command)
 
 def run():
     main()
